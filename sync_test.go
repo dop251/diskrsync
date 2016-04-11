@@ -149,12 +149,34 @@ func TestShrink(t *testing.T) {
 	syncAndCheckEqual(src, dst, t)
 }
 
-func syncAndCheckEqual(src, dst []byte, t *testing.T) {
+func TestNoChange(t *testing.T) {
+	src := make([]byte, 2*1024*1024)
+	dst := make([]byte, 2*1024*1024)
+
+	for i := 0; i < len(src); i++ {
+		src[i] = byte(rand.Int31n(256))
+	}
+
+	copy(dst, src)
+
+	sent, received := syncAndCheckEqual(src, dst, t)
+	if sent != 17 {
+		t.Fatalf("Sent %d bytes (expected 17)", sent)
+	}
+	if received != 80 {
+		t.Fatalf("Received %d bytes (expected 80)", received)
+	}
+}
+
+func syncAndCheckEqual(src, dst []byte, t *testing.T) (sent, received int64) {
 	srcReader, dstWriter := io.Pipe()
 	dstReader, srcWriter := io.Pipe()
 
 	srcR := &memFile{data: src}
 	dstW := &memFile{data: dst}
+
+	dstReaderC := &CountingReader{Reader: dstReader}
+	dstWriterC := &CountingWriteCloser{WriteCloser: dstWriter}
 
 	go func() {
 		err := Source(srcR, int64(len(src)), srcReader, srcWriter, false, false)
@@ -164,7 +186,7 @@ func syncAndCheckEqual(src, dst []byte, t *testing.T) {
 		srcWriter.Close()
 	}()
 
-	err := Target(dstW, int64(len(dst)), dstReader, dstWriter, false, false)
+	err := Target(dstW, int64(len(dst)), dstReaderC, dstWriterC, false, false)
 	dstWriter.Close()
 
 	if err != nil {
@@ -175,6 +197,7 @@ func syncAndCheckEqual(src, dst []byte, t *testing.T) {
 		t.Fatal("Not equal")
 	}
 
+	return dstReaderC.Count(), dstWriterC.Count()
 }
 
 func BenchmarkBlake2(b *testing.B) {

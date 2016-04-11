@@ -193,7 +193,7 @@ func (t *tree) calc(verbose bool) error {
 
 	t.root = t.build(0, t.size, order, levels)
 
-	bufs := [2][]byte{}
+	var bufs [2][]byte
 	bufs[0] = make([]byte, bs + 1)
 	bufs[1] = make([]byte, bs + 1)
 	var bufIdx int
@@ -220,6 +220,7 @@ func (t *tree) calc(verbose bool) error {
 		if n.size == 0 {
 			panic("Leaf node size is zero")
 		}
+		bufIdx ^= 1
 		b := bufs[bufIdx][:n.size]
 		r, err := io.ReadFull(reader, b)
 		rr += int64(r)
@@ -227,17 +228,19 @@ func (t *tree) calc(verbose bool) error {
 			return err
 		}
 
-		for i := 0; i < int(levels); i++ {
+		for i := byte(0); i < levels; i++ {
 			<-ch
 		}
-
 		for curNode := n; curNode != nil; curNode = curNode.parent {
 			go func(n *node, b []byte) {
 				n.hash.Write(b)
 				ch <- 1
 			}(curNode, b)
 		}
-		bufIdx ^= 1
+	}
+
+	for i := byte(0); i < levels; i++ {
+		<-ch
 	}
 
 	if rr < t.size {
