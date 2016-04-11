@@ -36,7 +36,7 @@ spgz -x /mnt/backup/disk /dev/vg00/....
 
 
 ```shell
-diskrsync --verbose --nocompress --ssh-flags="-i id_file" /var/lib/libvirt/images/disk.img ruser@rbackuphost:/mnt/backup/
+diskrsync --verbose --no-compress --ssh-flags="-i id_file" /var/lib/libvirt/images/disk.img ruser@rbackuphost:/mnt/backup/
 ```
 
 This ensures that /mnt/backup/disk.img is up-to-date with the source file.
