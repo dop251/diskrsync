@@ -154,17 +154,30 @@ func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 
 	defer f.Close()
 
-	size, err := f.Seek(0, os.SEEK_END)
+	var src io.ReadSeeker
+
+	// Try to open as an spgz file
+	sf, err := spgz.NewFromFile(f, os.O_RDONLY)
+	if err != nil {
+		if err != spgz.ErrInvalidFormat {
+			return err
+		}
+		src = f
+	} else {
+		src = sf
+	}
+
+	size, err := src.Seek(0, os.SEEK_END)
 	if err != nil {
 		return err
 	}
 
-	_, err = f.Seek(0, os.SEEK_SET)
+	_, err = src.Seek(0, os.SEEK_SET)
 	if err != nil {
 		return err
 	}
 
-	err = diskrsync.Source(f, size, cmdReader, cmdWriter, true, opts.verbose)
+	err = diskrsync.Source(src, size, cmdReader, cmdWriter, true, opts.verbose)
 	cmdWriter.Close()
 	return err
 }
@@ -173,23 +186,29 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 	var w io.ReadWriteSeeker
 	useBuffer := false
 
-	if opts.noCompress {
-		f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0666)
-		if err != nil {
-			return err
-		}
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
 
+	if !opts.noCompress {
+		sf, err := spgz.NewFromFileSize(f, os.O_RDWR|os.O_CREATE, diskrsync.DefTargetBlockSize)
+		if err != nil {
+			if err != spgz.ErrInvalidFormat {
+				f.Close()
+				return err
+			}
+		} else {
+			defer sf.Close()
+			w = sf
+		}
+	}
+
+	if w == nil {
 		sf := spgz.NewSparseWriter(spgz.NewSparseFile(f))
 		defer sf.Close()
 		w = sf
 		useBuffer = true
-	} else {
-		f, err := spgz.OpenFileSize(p, os.O_RDWR|os.O_CREATE, 0666, diskrsync.DefTargetBlockSize)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		w = f
 	}
 
 	size, err := w.Seek(0, os.SEEK_END)
