@@ -21,7 +21,8 @@ const (
 
 const (
 	hashSize = 64
-	bufSize  = 32 * 1024
+
+	DefTargetBlockSize = 128 * 1024
 )
 
 const (
@@ -150,7 +151,7 @@ func (t *tree) first(n *node) *node {
 
 func (t *tree) calc(verbose bool) error {
 
-	var targetBlockSize int64 = 4096
+	var targetBlockSize int64 = DefTargetBlockSize
 
 	for t.size/targetBlockSize > 1048576 {
 		targetBlockSize <<= 1
@@ -204,7 +205,7 @@ func (t *tree) calc(verbose bool) error {
 
 	if t.useBuffer {
 		var bufSize int
-		for bufSize = 32768; bufSize < bs; bufSize <<= 1 {}
+		for bufSize = DefTargetBlockSize; bufSize < bs; bufSize <<= 1 {}
 
 		reader = bufio.NewReaderSize(t.reader, bufSize)
 	} else {
@@ -331,8 +332,8 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 
 		holeStart := int64(-1)
 		curPos := commonSize
-		buf := make([]byte, bufSize)
-		bw := bufio.NewWriterSize(cmdWriter, bufSize * 2)
+		buf := make([]byte, DefTargetBlockSize)
+		bw := bufio.NewWriterSize(cmdWriter, DefTargetBlockSize * 2)
 
 		for {
 			var r int
@@ -515,7 +516,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 		}
 
 		hole := false
-		rd := bufio.NewReaderSize(cmdReader, bufSize * 2)
+		rd := bufio.NewReaderSize(cmdReader, DefTargetBlockSize * 2)
 
 		for {
 			var cmd byte
@@ -529,7 +530,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 			}
 
 			if cmd == cmdBlock {
-				_, err = io.CopyN(writer, rd, bufSize)
+				_, err = io.CopyN(writer, rd, DefTargetBlockSize)
 
 				hole = false
 				if err != nil {

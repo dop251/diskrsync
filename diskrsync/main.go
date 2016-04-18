@@ -184,7 +184,7 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		w = sf
 		useBuffer = true
 	} else {
-		f, err := spgz.OpenFile(p, os.O_RDWR|os.O_CREATE, 0666)
+		f, err := spgz.OpenFileSize(p, os.O_RDWR|os.O_CREATE, 0666, diskrsync.DefTargetBlockSize)
 		if err != nil {
 			return err
 		}
