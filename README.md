@@ -10,7 +10,7 @@ It is important that the source file does not change during the process. Typical
 be achieved by creating an LVM snapshot or by freezing the VM if that's not possible.
 
 By default the resulting file is compressed using the [spgz](https://github.com/dop251/spgz) library (this can be disabled by
-using --nocompress flag). Note this only works on filesystems that support punching holes in
+using --no-compress flag). Note this only works on filesystems that support punching holes in
 files like xfs or ext4.
 
 The utility handles sparse files (or just files with a lot of zeros) efficiently. The resulting
