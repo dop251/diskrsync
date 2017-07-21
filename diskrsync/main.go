@@ -39,7 +39,7 @@ type remoteProc struct {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] <src> <dst>\nsrc and dst is [[user@]host:]path", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] [--verbose] <src> <dst>\nsrc and dst is [[user@]host:]path\n", os.Args[0])
 	os.Exit(2)
 }
 
