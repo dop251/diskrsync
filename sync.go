@@ -1,18 +1,18 @@
 package diskrsync
 
 import (
+	"bufio"
 	"bytes"
-	"github.com/dop251/spgz"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	hh "github.com/codahale/blake2"
+	"github.com/dop251/spgz"
 	"hash"
 	"io"
 	"log"
 	"math"
 	"os"
-	"bufio"
 )
 
 const (
@@ -48,9 +48,9 @@ type node struct {
 }
 
 type tree struct {
-	root   *node
-	size   int64
-	reader io.ReadSeeker
+	root      *node
+	size      int64
+	reader    io.ReadSeeker
 	useBuffer bool
 }
 
@@ -195,8 +195,8 @@ func (t *tree) calc(verbose bool) error {
 	t.root = t.build(0, t.size, order, levels)
 
 	var bufs [2][]byte
-	bufs[0] = make([]byte, bs + 1)
-	bufs[1] = make([]byte, bs + 1)
+	bufs[0] = make([]byte, bs+1)
+	bufs[1] = make([]byte, bs+1)
 	var bufIdx int
 
 	rr := int64(0)
@@ -205,7 +205,8 @@ func (t *tree) calc(verbose bool) error {
 
 	if t.useBuffer {
 		var bufSize int
-		for bufSize = DefTargetBlockSize; bufSize < bs; bufSize <<= 1 {}
+		for bufSize = DefTargetBlockSize; bufSize < bs; bufSize <<= 1 {
+		}
 
 		reader = bufio.NewReaderSize(t.reader, bufSize)
 	} else {
@@ -302,8 +303,8 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 		s := source{
 			base: base{
 				t: tree{
-					reader: reader,
-					size:   commonSize,
+					reader:    reader,
+					size:      commonSize,
 					useBuffer: useBuffer,
 				},
 				cmdReader: cmdReader,
@@ -333,7 +334,7 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 		holeStart := int64(-1)
 		curPos := commonSize
 		buf := make([]byte, DefTargetBlockSize)
-		bw := bufio.NewWriterSize(cmdWriter, DefTargetBlockSize * 2)
+		bw := bufio.NewWriterSize(cmdWriter, DefTargetBlockSize*2)
 
 		for {
 			var r int
@@ -486,8 +487,8 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 		t := target{
 			base: base{
 				t: tree{
-					reader: writer,
-					size:   commonSize,
+					reader:    writer,
+					size:      commonSize,
 					useBuffer: useBuffer,
 				},
 				cmdReader: cmdReader,
@@ -516,7 +517,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 		}
 
 		hole := false
-		rd := bufio.NewReaderSize(cmdReader, DefTargetBlockSize * 2)
+		rd := bufio.NewReaderSize(cmdReader, DefTargetBlockSize*2)
 
 		for {
 			var cmd byte

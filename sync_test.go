@@ -124,7 +124,7 @@ func TestExpand(t *testing.T) {
 		dst[i] = byte(rand.Int31n(256))
 	}
 
-	src := make([]byte, 2*1024*1024 + 333333)
+	src := make([]byte, 2*1024*1024+333333)
 
 	copy(src, dst)
 
@@ -136,7 +136,7 @@ func TestExpand(t *testing.T) {
 }
 
 func TestShrink(t *testing.T) {
-	dst := make([]byte, 2*1024*1024 + 333333)
+	dst := make([]byte, 2*1024*1024+333333)
 
 	for i := 0; i < len(dst); i++ {
 		dst[i] = byte(rand.Int31n(256))
