@@ -2,7 +2,7 @@ diskrsync -- rsync for block devices and disk images
 ===
 
 This is a utility for remote backup of disk image files or devices. It uses ssh as a transport
-and tries to minimise the amount of data transferred. This is done by building a tree of
+and tries to minimise the amount of data transferred. This is done by building a Merkle tree of
 [blake2](https://blake2.net/) hashes on both the source and the target hosts and then
 traversing the tree only transmitting those blocks where the hashes differ.
 

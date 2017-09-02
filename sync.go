@@ -8,15 +8,15 @@ import (
 	"fmt"
 	hh "github.com/codahale/blake2"
 	"github.com/dop251/spgz"
-	"hash"
 	"io"
 	"log"
 	"math"
 	"os"
+	"hash"
 )
 
 const (
-	hdrMagic = "BSNC0001"
+	hdrMagic = "BSNC0002"
 )
 
 const (
@@ -36,15 +36,27 @@ var (
 	ErrInvalidFormat = errors.New("Invalid data format")
 )
 
-type node struct {
+type hashPool []hash.Hash
+
+type workCtx struct {
+	buf []byte
+	n *node
 	hash hash.Hash
 
+	avail, hashReady chan struct{}
+}
+
+type node struct {
+	buf [hashSize]byte
 	parent *node
-	num    byte
+	idx    int
 
 	children []*node
 
 	size int
+
+	hash hash.Hash
+	sum []byte
 }
 
 type tree struct {
@@ -85,6 +97,24 @@ type CountingWriteCloser struct {
 	counting
 }
 
+func (p *hashPool) get() (h hash.Hash) {
+	l := len(*p)
+	if l > 0 {
+		l--
+		h = (*p)[l]
+		(*p)[l] = nil
+		*p = (*p)[:l]
+		h.Reset()
+	} else {
+		h = hh.NewBlake2B()
+	}
+	return
+}
+
+func (p *hashPool) put(h hash.Hash) {
+	*p = append(*p, h)
+}
+
 func (c *counting) Count() int64 {
 	return c.count
 }
@@ -103,8 +133,8 @@ func (r *CountingWriteCloser) Write(buf []byte) (n int, err error) {
 
 func (n *node) next() *node {
 	if n.parent != nil {
-		if int(n.num) < len(n.parent.children)-1 {
-			return n.parent.children[n.num+1]
+		if n.idx < len(n.parent.children)-1 {
+			return n.parent.children[n.idx+1]
 		}
 		nn := n.parent.next()
 		if nn != nil {
@@ -114,6 +144,29 @@ func (n *node) next() *node {
 	return nil
 }
 
+func (n *node) childReady(child *node, pool *hashPool, h hash.Hash) {
+	if n.hash == nil {
+		if h != nil {
+			h.Reset()
+			n.hash = h
+		} else {
+			n.hash = pool.get()
+		}
+	} else {
+		if h != nil {
+			pool.put(h)
+		}
+	}
+	n.hash.Write(child.sum)
+	if child.idx == len(n.children) - 1 {
+		n.sum = n.hash.Sum(n.buf[:0])
+		if n.parent != nil {
+			n.parent.childReady(n, pool, n.hash)
+		}
+		n.hash = nil
+	}
+}
+
 func (b *base) buffer(size int64) []byte {
 	if int64(cap(b.buf)) < size {
 		b.buf = make([]byte, size+1)
@@ -121,19 +174,17 @@ func (b *base) buffer(size int64) []byte {
 	return b.buf[:size]
 }
 
-func (t *tree) build(offset, length int64, order, level byte) *node {
-	n := &node{
-		hash: hh.NewBlake2B(),
-	}
+func (t *tree) build(offset, length int64, order, level int) *node {
+	n := &node{}
 	level--
 	if level > 0 {
 		n.children = make([]*node, order)
 		b := offset
-		for i := byte(0); i < order; i++ {
+		for i := 0; i < order; i++ {
 			l := offset + (length * int64(i+1) / int64(order)) - b
 			n.children[i] = t.build(b, l, order, level)
 			n.children[i].parent = n
-			n.children[i].num = i
+			n.children[i].idx = i
 			b += l
 		}
 	} else {
@@ -159,9 +210,8 @@ func (t *tree) calc(verbose bool) error {
 
 	blocks := t.size / targetBlockSize
 
-	levels := byte(8)
-
-	order := byte(1)
+	levels := 8
+	order := 1
 	var d int64 = -1
 	for {
 		b := int64(math.Pow(float64(order+1), 7))
@@ -183,7 +233,7 @@ func (t *tree) calc(verbose bool) error {
 
 	if order < 2 {
 		order = 2
-		levels = byte(math.Log2(float64(blocks))) + 1
+		levels = int(math.Log2(float64(blocks))) + 1
 	}
 
 	bs := int(float64(t.size) / math.Pow(float64(order), float64(levels-1)))
@@ -193,11 +243,6 @@ func (t *tree) calc(verbose bool) error {
 	}
 
 	t.root = t.build(0, t.size, order, levels)
-
-	var bufs [2][]byte
-	bufs[0] = make([]byte, bs+1)
-	bufs[1] = make([]byte, bs+1)
-	var bufIdx int
 
 	rr := int64(0)
 
@@ -213,43 +258,85 @@ func (t *tree) calc(verbose bool) error {
 		reader = t.reader
 	}
 
-	ch := make(chan int, levels)
-	for i := byte(0); i < levels; i++ {
-		ch <- 1
+	var pool hashPool = make([]hash.Hash, 0, levels)
+
+	workItems := make([]*workCtx, 2)
+	for i := range workItems {
+		workItems[i] = &workCtx{
+			buf: make([]byte, bs+1),
+			hash: hh.NewBlake2B(),
+			avail: make(chan struct{}, 1),
+			hashReady: make(chan struct{}, 1),
+		}
+		workItems[i].avail <- struct{}{}
 	}
+
+	go func() {
+		idx := 0
+		for {
+			wi := workItems[idx]
+			<- wi.hashReady
+			if wi.n == nil {
+				break
+			}
+			if wi.n.parent != nil {
+				wi.n.parent.childReady(wi.n, &pool, nil)
+			}
+			wi.avail <- struct{}{}
+			idx++
+			if idx >= len(workItems) {
+				idx = 0
+			}
+		}
+	}()
+
+	workIdx := 0
 
 	for n := t.first(t.root); n != nil; n = n.next() {
 		if n.size == 0 {
 			panic("Leaf node size is zero")
 		}
-		bufIdx ^= 1
-		b := bufs[bufIdx][:n.size]
+
+		wi := workItems[workIdx]
+
+		<- wi.avail
+
+		b := wi.buf[:n.size]
 		r, err := io.ReadFull(reader, b)
 		rr += int64(r)
 		if err != nil {
 			return err
 		}
 
-		for i := byte(0); i < levels; i++ {
-			<-ch
+		wi.n = n
+
+		go func() {
+			wi.hash.Write(b)
+			wi.n.sum = wi.hash.Sum(wi.n.buf[:0])
+			wi.hash.Reset()
+			wi.hashReady <- struct{}{}
+		}()
+
+		workIdx++
+		if workIdx >= len(workItems) {
+			workIdx = 0
 		}
-		for curNode := n; curNode != nil; curNode = curNode.parent {
-			go func(n *node, b []byte) {
-				n.hash.Write(b)
-				ch <- 1
-			}(curNode, b)
-		}
+
 	}
 
-	for i := byte(0); i < levels; i++ {
-		<-ch
+	// wait until fully processed
+	for i := range workItems {
+		<- workItems[i].avail
 	}
+
+	// finish the goroutine
+	workItems[workIdx].n = nil
+	workItems[workIdx].hashReady <- struct{}{}
 
 	if rr < t.size {
 		return fmt.Errorf("Read less data (%d) than expected (%d)", rr, t.size)
 	}
 
-	// log.Printf("Read: %d, Hash: %v\n", rr, t.root.hash.Sum(nil))
 	return nil
 }
 
@@ -411,7 +498,7 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 		return
 	}
 
-	if bytes.Equal(root.hash.Sum(nil), remoteHash) {
+	if bytes.Equal(root.sum, remoteHash) {
 		err = binary.Write(s.cmdWriter, binary.LittleEndian, cmdEqual)
 		return
 	}
@@ -454,7 +541,6 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 		order := byte(len(root.children))
 		for i := byte(0); i < order; i++ {
 			l := offset + (size * int64(i+1) / int64(order)) - b
-			//l := offset + int64(float64(size) * (float64(i + 1) / float64(order))) - b
 			err = s.subtree(root.children[i], b, l)
 			if err != nil {
 				return
@@ -577,7 +663,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 }
 
 func (t *target) subtree(root *node, offset, size int64) (err error) {
-	_, err = t.cmdWriter.Write(root.hash.Sum(nil))
+	_, err = t.cmdWriter.Write(root.sum)
 	if err != nil {
 		return
 	}
@@ -611,7 +697,6 @@ func (t *target) subtree(root *node, offset, size int64) (err error) {
 			order := byte(len(root.children))
 			for i := byte(0); i < order; i++ {
 				l := offset + (size * int64(i+1) / int64(order)) - b
-				// l := offset + int64(float64(size) * (float64(i + 1) / float64(order))) - b
 				err = t.subtree(root.children[i], b, l)
 				if err != nil {
 					return
