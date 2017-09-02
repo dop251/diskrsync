@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"math"
-	"os"
 	"hash"
 	"golang.org/x/crypto/blake2b"
 )
@@ -413,7 +412,7 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 
 	if size > commonSize {
 		// Write the tail
-		_, err = reader.Seek(commonSize, os.SEEK_SET)
+		_, err = reader.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
 		}
@@ -510,7 +509,7 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 			panic("Leaf node size mismatch")
 		}
 
-		_, err = s.reader.Seek(offset, os.SEEK_SET)
+		_, err = s.reader.Seek(offset, io.SeekStart)
 		if err != nil {
 			return
 		}
@@ -597,7 +596,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 	if size < remoteSize {
 		// Read the tail
 		// log.Printf("Reading tail (%d bytes)...\n", remoteSize-size)
-		_, err = writer.Seek(commonSize, os.SEEK_SET)
+		_, err = writer.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
 		}
@@ -635,7 +634,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 					if err != nil {
 						return
 					}
-					_, err = writer.Seek(holeSize, os.SEEK_CUR)
+					_, err = writer.Seek(holeSize, io.SeekCurrent)
 					if err != nil {
 						return
 					}
@@ -678,7 +677,7 @@ func (t *target) subtree(root *node, offset, size int64) (err error) {
 
 	if cmd == cmdNotEqual || cmd == cmdHole {
 		if root.size > 0 {
-			_, err = t.writer.Seek(offset, os.SEEK_SET)
+			_, err = t.writer.Seek(offset, io.SeekStart)
 			if err != nil {
 				return
 			}
