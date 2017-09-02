@@ -6,13 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	hh "github.com/codahale/blake2"
 	"github.com/dop251/spgz"
 	"io"
 	"log"
 	"math"
 	"os"
 	"hash"
+	"golang.org/x/crypto/blake2b"
 )
 
 const (
@@ -106,7 +106,7 @@ func (p *hashPool) get() (h hash.Hash) {
 		*p = (*p)[:l]
 		h.Reset()
 	} else {
-		h = hh.NewBlake2B()
+		h, _ = blake2b.New512(nil)
 	}
 	return
 }
@@ -264,10 +264,10 @@ func (t *tree) calc(verbose bool) error {
 	for i := range workItems {
 		workItems[i] = &workCtx{
 			buf: make([]byte, bs+1),
-			hash: hh.NewBlake2B(),
 			avail: make(chan struct{}, 1),
 			hashReady: make(chan struct{}, 1),
 		}
+		workItems[i].hash, _ = blake2b.New512(nil)
 		workItems[i].avail <- struct{}{}
 	}
 
