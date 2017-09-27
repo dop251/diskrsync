@@ -651,7 +651,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 			}
 		}
 
-	} else {
+	} else if size > remoteSize {
 		// Truncate target
 		if f, ok := writer.(spgz.Truncatable); ok {
 			err = f.Truncate(commonSize)
