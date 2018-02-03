@@ -195,6 +195,9 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		sf, err := spgz.NewFromFileSize(f, os.O_RDWR|os.O_CREATE, diskrsync.DefTargetBlockSize)
 		if err != nil {
 			if err != spgz.ErrInvalidFormat {
+				if err == spgz.ErrPunchHoleNotSupported {
+					err = fmt.Errorf("Target does not support compression. Try with -no-compress option (error was '%v')", err)
+				}
 				f.Close()
 				return err
 			}
@@ -205,7 +208,7 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 	}
 
 	if w == nil {
-		sf := spgz.NewSparseWriter(spgz.NewSparseFile(f))
+		sf := spgz.NewSparseWriter(spgz.NewSparseFileWithFallback(f))
 		defer sf.Close()
 		w = sf
 		useBuffer = true
