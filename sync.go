@@ -211,29 +211,35 @@ func (t *tree) calc(verbose bool) error {
 
 	levels := 8
 	order := 1
-	var d int64 = -1
-	for {
-		b := int64(math.Pow(float64(order+1), 7))
-		bs := t.size / b
-		if bs < targetBlockSize/2 {
-			break
+
+	if blocks > 0 {
+		var d int64 = -1
+		for {
+			b := int64(math.Pow(float64(order+1), 7))
+			bs := t.size / b
+			if bs < targetBlockSize/2 {
+				break
+			}
+			nd := targetBlockSize - bs
+			if nd < 0 {
+				nd = -nd
+			}
+			// log.Printf("b: %d, d: %d\n", b, nd)
+			if d != -1 && nd > d {
+				break
+			}
+			d = nd
+			order++
 		}
-		nd := targetBlockSize - bs
-		if nd < 0 {
-			nd = -nd
+		if order < 2 {
+			order = 2
+			levels = int(math.Log2(float64(blocks))) + 1
 		}
-		// log.Printf("b: %d, d: %d\n", b, nd)
-		if d != -1 && nd > d {
-			break
-		}
-		d = nd
-		order++
+	} else {
+		levels = 1
+		order = 1
 	}
 
-	if order < 2 {
-		order = 2
-		levels = int(math.Log2(float64(blocks))) + 1
-	}
 
 	bs := int(float64(t.size) / math.Pow(float64(order), float64(levels-1)))
 

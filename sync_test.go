@@ -168,6 +168,18 @@ func TestNoChange(t *testing.T) {
 	}
 }
 
+
+func TestSmallFile(t *testing.T) {
+	src := make([]byte, 128)
+	dst := make([]byte, 128)
+
+	for i := range src {
+		src[i] = 'x'
+	}
+
+	syncAndCheckEqual(src, dst, t)
+}
+
 func syncAndCheckEqual(src, dst []byte, t *testing.T) (sent, received int64) {
 	srcReader, dstWriter := io.Pipe()
 	dstReader, srcWriter := io.Pipe()
