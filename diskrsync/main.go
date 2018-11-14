@@ -38,6 +38,11 @@ type remoteProc struct {
 	cmd *exec.Cmd
 }
 
+type targetFile interface {
+	io.ReadWriteSeeker
+	io.Closer
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] [--verbose] <src> <dst>\nsrc and dst is [[user@]host:]path\n", os.Args[0])
 	os.Exit(2)
@@ -183,7 +188,7 @@ func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 }
 
 func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) error {
-	var w io.ReadWriteSeeker
+	var w targetFile
 	useBuffer := false
 
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0666)
@@ -191,28 +196,36 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		return err
 	}
 
-	if !opts.noCompress {
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+
+	if info.Mode() & (os.ModeDevice | os.ModeCharDevice) != 0 {
+		w = f
+		useBuffer = true
+	} else if !opts.noCompress {
 		sf, err := spgz.NewFromFileSize(f, os.O_RDWR|os.O_CREATE, diskrsync.DefTargetBlockSize)
 		if err != nil {
 			if err != spgz.ErrInvalidFormat {
 				if err == spgz.ErrPunchHoleNotSupported {
-					err = fmt.Errorf("Target does not support compression. Try with -no-compress option (error was '%v')", err)
+					err = fmt.Errorf("target does not support compression. Try with -no-compress option (error was '%v')", err)
 				}
 				f.Close()
 				return err
 			}
 		} else {
-			defer sf.Close()
 			w = sf
 		}
 	}
 
 	if w == nil {
-		sf := spgz.NewSparseWriter(spgz.NewSparseFileWithFallback(f))
-		defer sf.Close()
-		w = sf
+		w = spgz.NewSparseWriter(spgz.NewSparseFileWithFallback(f))
 		useBuffer = true
 	}
+
+	defer w.Close()
 
 	size, err := w.Seek(0, os.SEEK_END)
 	if err != nil {
