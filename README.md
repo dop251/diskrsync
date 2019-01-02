@@ -18,6 +18,30 @@ file will be sparse (even if not compressed).
 
 Size changes are also supported (both shrinks and expansions).
 
+Installation
+---
+1. Install go. Version 1.7 is minimum required but the newer the better.
+If your distribution lacks the required version, check backports or updates (e.g. for [debian](https://packages.debian.org/search?keywords=golang) or [ubuntu](https://packages.ubuntu.com/search?keywords=golang))
+Alternatively, install [manually](https://golang.org/doc/install).
+
+2. Run the following commands:
+```shell
+mkdir workspace
+cd workspace
+export GOPATH=$(pwd)
+go get github.com/dop251/diskrsync/diskrsync
+sudo cp -a bin/diskrsync /usr/local/bin
+```
+
+3. Make sure the binary is copied to the remote machine as well.
+If the remote machine has a different CPU or OS you may want to
+use [cross-compilation](https://dave.cheney.net/2015/08/22/cross-compilation-with-go-1-5).
+For example if you are want to build a binary for ARM:
+```shell
+GOARCH=arm go get github.com/dop251/diskrsync/diskrsync
+ls -l bin/linux_arm/diskrsync
+```
+
 
 Usage examples
 ---
