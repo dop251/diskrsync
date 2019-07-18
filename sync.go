@@ -6,11 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/dop251/spgz"
+	"hash"
 	"io"
 	"log"
 	"math"
-	"hash"
+
+	"github.com/dop251/spgz"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -38,15 +39,15 @@ var (
 type hashPool []hash.Hash
 
 type workCtx struct {
-	buf []byte
-	n *node
+	buf  []byte
+	n    *node
 	hash hash.Hash
 
 	avail, hashReady chan struct{}
 }
 
 type node struct {
-	buf [hashSize]byte
+	buf    [hashSize]byte
 	parent *node
 	idx    int
 
@@ -55,7 +56,7 @@ type node struct {
 	size int
 
 	hash hash.Hash
-	sum []byte
+	sum  []byte
 }
 
 type tree struct {
@@ -157,7 +158,7 @@ func (n *node) childReady(child *node, pool *hashPool, h hash.Hash) {
 		}
 	}
 	n.hash.Write(child.sum)
-	if child.idx == len(n.children) - 1 {
+	if child.idx == len(n.children)-1 {
 		n.sum = n.hash.Sum(n.buf[:0])
 		if n.parent != nil {
 			n.parent.childReady(n, pool, n.hash)
@@ -240,7 +241,6 @@ func (t *tree) calc(verbose bool) error {
 		order = 1
 	}
 
-
 	bs := int(float64(t.size) / math.Pow(float64(order), float64(levels-1)))
 
 	if verbose {
@@ -268,8 +268,8 @@ func (t *tree) calc(verbose bool) error {
 	workItems := make([]*workCtx, 2)
 	for i := range workItems {
 		workItems[i] = &workCtx{
-			buf: make([]byte, bs+1),
-			avail: make(chan struct{}, 1),
+			buf:       make([]byte, bs+1),
+			avail:     make(chan struct{}, 1),
 			hashReady: make(chan struct{}, 1),
 		}
 		workItems[i].hash, _ = blake2b.New512(nil)
@@ -280,7 +280,7 @@ func (t *tree) calc(verbose bool) error {
 		idx := 0
 		for {
 			wi := workItems[idx]
-			<- wi.hashReady
+			<-wi.hashReady
 			if wi.n == nil {
 				break
 			}
@@ -297,14 +297,22 @@ func (t *tree) calc(verbose bool) error {
 
 	workIdx := 0
 
+	if verbose {
+		log.Printf("Generating block hashes.")
+	}
+
 	for n := t.first(t.root); n != nil; n = n.next() {
 		if n.size == 0 {
 			panic("Leaf node size is zero")
 		}
 
+		if verbose {
+			fmt.Printf("Processing at %d (%d/%d/%d)   \r", rr, n.parent.idx, n.idx, workIdx)
+		}
+
 		wi := workItems[workIdx]
 
-		<- wi.avail
+		<-wi.avail
 
 		b := wi.buf[:n.size]
 		r, err := io.ReadFull(reader, b)
@@ -331,12 +339,16 @@ func (t *tree) calc(verbose bool) error {
 
 	// wait until fully processed
 	for i := range workItems {
-		<- workItems[i].avail
+		<-workItems[i].avail
 	}
 
 	// finish the goroutine
 	workItems[workIdx].n = nil
 	workItems[workIdx].hashReady <- struct{}{}
+
+	if verbose {
+		log.Print("Hash building finished.   ")
+	}
 
 	if rr < t.size {
 		return fmt.Errorf("Read less data (%d) than expected (%d)", rr, t.size)
@@ -405,12 +417,18 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 			reader: reader,
 		}
 
+		if verbose {
+			log.Print("Calculating block hashes for the file")
+		}
 		err = s.t.calc(verbose)
 		if err != nil {
 			return
 		}
 
-		err = s.subtree(s.t.root, 0, commonSize)
+		if verbose {
+			log.Print("Transferring the difference to the target")
+		}
+		err = s.subtree(s.t.root, 0, commonSize, verbose)
 		if err != nil {
 			return
 		}
@@ -418,6 +436,9 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 
 	if size > commonSize {
 		// Write the tail
+		if verbose {
+			log.Printf("Transferring the tail (%d > %d) to the target", size, commonSize)
+		}
 		_, err = reader.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
@@ -495,7 +516,7 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 	return
 }
 
-func (s *source) subtree(root *node, offset, size int64) (err error) {
+func (s *source) subtree(root *node, offset, size int64, verbose bool) (err error) {
 	remoteHash := make([]byte, hashSize)
 
 	_, err = io.ReadFull(s.cmdReader, remoteHash)
@@ -504,11 +525,17 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 	}
 
 	if bytes.Equal(root.sum, remoteHash) {
+		if verbose {
+			fmt.Printf("Block match at %d, skipping transfer.     \r", offset)
+		}
 		err = binary.Write(s.cmdWriter, binary.LittleEndian, cmdEqual)
 		return
 	}
 
 	if root.size > 0 {
+		if verbose {
+			fmt.Printf("Block mismatch at %d, transferring.       \r", offset)
+		}
 		// log.Printf("Blocks at %d don't match\n", offset)
 
 		if int64(root.size) != size {
@@ -537,6 +564,9 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 			_, err = s.cmdWriter.Write(buf)
 		}
 	} else {
+		if verbose {
+			fmt.Printf("Block mismatch at %d, transfer+treewalk.  \r", offset)
+		}
 		err = binary.Write(s.cmdWriter, binary.LittleEndian, cmdNotEqual)
 		if err != nil {
 			return
@@ -546,7 +576,7 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 		order := byte(len(root.children))
 		for i := byte(0); i < order; i++ {
 			l := offset + (size * int64(i+1) / int64(order)) - b
-			err = s.subtree(root.children[i], b, l)
+			err = s.subtree(root.children[i], b, l, verbose)
 			if err != nil {
 				return
 			}
