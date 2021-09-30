@@ -136,6 +136,20 @@ func TestExpand(t *testing.T) {
 	syncAndCheckEqual(src, dst, t)
 }
 
+func TestExpandWithZeros(t *testing.T) {
+	dst := make([]byte, 2*1024*1024)
+
+	for i := 0; i < len(dst); i++ {
+		dst[i] = byte(rand.Int31n(256))
+	}
+
+	src := make([]byte, 2*1024*1024+333333)
+
+	copy(src, dst)
+
+	syncAndCheckEqual(src, dst, t)
+}
+
 func TestShrink(t *testing.T) {
 	dst := make([]byte, 2*1024*1024+333333)
 
@@ -191,18 +205,26 @@ func syncAndCheckEqual(src, dst []byte, t *testing.T) (sent, received int64) {
 	dstReaderC := &CountingReader{Reader: dstReader}
 	dstWriterC := &CountingWriteCloser{WriteCloser: dstWriter}
 
+	srcErrChan := make(chan error, 1)
+
 	go func() {
 		err := Source(srcR, int64(len(src)), srcReader, srcWriter, false, false)
-		if err != nil {
-			t.Fatal(err)
-		}
 		srcWriter.Close()
+		if err != nil {
+			srcErrChan <- err
+			return
+		}
+		srcErrChan <- nil
 	}()
 
 	err := Target(dstW, int64(len(dst)), dstReaderC, dstWriterC, false, false)
 	dstWriter.Close()
 
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = <-srcErrChan; err != nil {
 		t.Fatal(err)
 	}
 

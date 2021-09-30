@@ -310,10 +310,10 @@ func (t *tree) calc(verbose bool) error {
 
 		b := wi.buf[:n.size]
 		r, err := io.ReadFull(reader, b)
-		rr += int64(r)
 		if err != nil {
-			return err
+			return fmt.Errorf("in calc at %d (expected %d, read %d): %w", rr, len(b), r, err)
 		}
+		rr += int64(r)
 
 		wi.n = n
 
@@ -341,7 +341,7 @@ func (t *tree) calc(verbose bool) error {
 	workItems[workIdx].hashReady <- struct{}{}
 
 	if rr < t.size {
-		return fmt.Errorf("Read less data (%d) than expected (%d)", rr, t.size)
+		return fmt.Errorf("read less data (%d) than expected (%d)", rr, t.size)
 	}
 
 	return nil
@@ -382,7 +382,7 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 	var remoteSize int64
 	remoteSize, err = readHeader(cmdReader)
 	if err != nil {
-		return
+		return fmt.Errorf("could not read header: %w", err)
 	}
 
 	var commonSize int64
@@ -420,6 +420,9 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 
 	if size > commonSize {
 		// Write the tail
+		if verbose {
+			log.Print("Writing tail...")
+		}
 		_, err = reader.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
@@ -439,10 +442,11 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 					break
 				}
 				if err != io.ErrUnexpectedEOF {
-					return
+					return fmt.Errorf("source, reading tail: %w", err)
 				}
 				buf = buf[:r]
 				stop = true
+				err = nil
 			}
 			if spgz.IsBlockZero(buf) {
 				if holeStart == -1 {
@@ -502,7 +506,7 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 
 	_, err = io.ReadFull(s.cmdReader, remoteHash)
 	if err != nil {
-		return
+		return fmt.Errorf("source/subtree, reading hash: %w", err)
 	}
 
 	if bytes.Equal(root.sum, remoteHash) {
@@ -525,7 +529,7 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 		buf := s.buffer(size)
 		_, err = io.ReadFull(s.reader, buf)
 		if err != nil {
-			return
+			return fmt.Errorf("source read failed at %d: %w", offset, err)
 		}
 
 		if spgz.IsBlockZero(buf) {
@@ -576,6 +580,10 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 		commonSize = remoteSize
 	}
 
+	if verbose {
+		log.Printf("Local size: %d, remote size: %d", size, remoteSize)
+	}
+
 	if commonSize > 0 {
 		t := target{
 			base: base{
@@ -603,7 +611,9 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 
 	if size < remoteSize {
 		// Read the tail
-		// log.Printf("Reading tail (%d bytes)...\n", remoteSize-size)
+		if verbose {
+			log.Printf("Reading tail (%d bytes)...", remoteSize-size)
+		}
 		_, err = writer.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
@@ -620,7 +630,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 					err = nil
 					break
 				}
-				return
+				return fmt.Errorf("target: while reading tail block header: %w", err)
 			}
 
 			if cmd == cmdBlock {
@@ -632,7 +642,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 						err = nil
 						break
 					} else {
-						return
+						return fmt.Errorf("target: while copying block: %w", err)
 					}
 				}
 			} else {
@@ -640,7 +650,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 					var holeSize int64
 					err = binary.Read(rd, binary.LittleEndian, &holeSize)
 					if err != nil {
-						return
+						return fmt.Errorf("target: while reading hole size: %w", err)
 					}
 					_, err = writer.Seek(holeSize, io.SeekCurrent)
 					if err != nil {
@@ -678,7 +688,7 @@ func (t *target) subtree(root *node, offset, size int64) (err error) {
 	var cmd byte
 	err = binary.Read(t.cmdReader, binary.LittleEndian, &cmd)
 	if err != nil {
-		return
+		return fmt.Errorf("target: while reading block header at %d: %w", offset, err)
 	}
 
 	// log.Printf("offset: %d, size: %d, cmd: %d\n", offset, size, cmd)
@@ -692,6 +702,9 @@ func (t *target) subtree(root *node, offset, size int64) (err error) {
 
 			if cmd == cmdNotEqual {
 				_, err = io.CopyN(t.writer, t.cmdReader, size)
+				if err != nil {
+					err = fmt.Errorf("while copying block data at %d: %w", offset, err)
+				}
 			} else {
 				buf := t.buffer(size)
 				for i := int64(0); i < size; i++ {

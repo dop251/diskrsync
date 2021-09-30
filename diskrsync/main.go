@@ -81,6 +81,9 @@ func createRemoteProc(host, path string, mode int, opts *options) (proc, error) 
 			m += " --no-compress"
 		}
 	}
+	if opts.verbose {
+		m += " --verbose"
+	}
 
 	args := make([]string, 1, 8)
 	args[0] = "ssh"
@@ -245,10 +248,11 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 	return err
 }
 
-func doCmd(opts *options) error {
+func doCmd(opts *options) bool {
 	src, err := createProc(flag.Arg(0), modeSource, opts)
 	if err != nil {
-		return err
+		log.Printf("Could not create source: %v", err)
+		return false
 	}
 
 	path := flag.Arg(1)
@@ -258,10 +262,12 @@ func doCmd(opts *options) error {
 
 	dst, err := createProc(path, modeTarget, opts)
 	if err != nil {
-		return err
+		log.Printf("Could not create target: %v", err)
+		return false
 	}
 
-	errChan := make(chan error, 1)
+	srcErrChan := make(chan error, 1)
+	dstErrChan := make(chan error, 1)
 
 	srcReader, dstWriter := io.Pipe()
 	dstReader, srcWriter := io.Pipe()
@@ -270,21 +276,24 @@ func doCmd(opts *options) error {
 	sw := &diskrsync.CountingWriteCloser{WriteCloser: srcWriter}
 
 	if opts.verbose {
-		src.Start(sr, sw, errChan)
+		src.Start(sr, sw, srcErrChan)
 	} else {
-		src.Start(srcReader, srcWriter, errChan)
+		src.Start(srcReader, srcWriter, srcErrChan)
 	}
 
-	dst.Start(dstReader, dstWriter, errChan)
-	err = <-errChan
-	if err != nil {
-		return err
+	dst.Start(dstReader, dstWriter, dstErrChan)
+	dstErr := <-dstErrChan
+	if dstErr != nil {
+		log.Printf("Target error: %v", dstErr)
 	}
-	err = <-errChan
+	srcErr := <-srcErrChan
+	if srcErr != nil {
+		log.Printf("Source error: %v", srcErr)
+	}
 	if opts.verbose {
 		log.Printf("Read: %d, wrote: %d\n", sr.Count(), sw.Count())
 	}
-	return err
+	return srcErr == nil && dstErr == nil
 }
 
 func main() {
@@ -319,9 +328,9 @@ func main() {
 		if flag.Arg(0) == "" || flag.Arg(1) == "" {
 			usage()
 		}
-		err := doCmd(&opts)
-		if err != nil {
-			log.Fatalf(err.Error())
+		ok := doCmd(&opts)
+		if !ok {
+			os.Exit(1)
 		}
 	}
 
