@@ -29,7 +29,7 @@ Alternatively, install [manually](https://golang.org/doc/install).
 mkdir workspace
 cd workspace
 GOPATH=$(pwd) go install github.com/dop251/diskrsync/diskrsync@latest
-sudo cp -a ./diskrsync /usr/local/bin
+sudo cp -a bin/diskrsync /usr/local/bin
 ```
 
 3. Make sure the binary is copied to the remote machine as well.
