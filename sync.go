@@ -6,11 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/dop251/spgz"
+	"hash"
 	"io"
 	"log"
 	"math"
-	"hash"
+
+	"github.com/dop251/spgz"
+
 	"golang.org/x/crypto/blake2b"
 )
 

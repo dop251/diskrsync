@@ -1,8 +1,6 @@
 package main
 
 import (
-	"github.com/dop251/diskrsync"
-	"github.com/dop251/spgz"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/dop251/diskrsync"
+	"github.com/dop251/spgz"
 )
 
 const (

@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"errors"
-	"github.com/codahale/blake2"
 	"hash"
 	"io"
 	"math/rand"
 	"os"
 	"testing"
+
+	"golang.org/x/crypto/blake2b"
 )
 
 type memFile struct {
@@ -214,7 +215,7 @@ func syncAndCheckEqual(src, dst []byte, t *testing.T) (sent, received int64) {
 
 func BenchmarkBlake2(b *testing.B) {
 	b.StopTimer()
-	h := blake2.NewBlake2B()
+	h, _ := blake2b.New512(nil)
 	buf := make([]byte, 4096)
 	for i := 0; i < len(buf); i++ {
 		buf[i] = byte(i)
@@ -228,10 +229,7 @@ func BenchmarkBlake2(b *testing.B) {
 
 func BenchmarkBlake256(b *testing.B) {
 	b.StopTimer()
-	conf := blake2.Config{
-		Size: 32,
-	}
-	h := blake2.New(&conf)
+	h, _ := blake2b.New256(nil)
 	buf := make([]byte, 4096)
 	for i := 0; i < len(buf); i++ {
 		buf[i] = byte(i)
@@ -263,7 +261,7 @@ func BenchmarkSequential(b *testing.B) {
 	b.StopTimer()
 	hashes := make([]hash.Hash, 8)
 	for i := 0; i < len(hashes); i++ {
-		hashes[i] = blake2.NewBlake2B()
+		hashes[i], _ = blake2b.New512(nil)
 	}
 	buf := make([]byte, 32768)
 	for i := 0; i < len(buf); i++ {
@@ -282,7 +280,7 @@ func BenchmarkParallel(b *testing.B) {
 	b.StopTimer()
 	hashes := make([]hash.Hash, 8)
 	for i := 0; i < len(hashes); i++ {
-		hashes[i] = blake2.NewBlake2B()
+		hashes[i], _ = blake2b.New512(nil)
 	}
 	buf := make([]byte, 32768)
 	for i := 0; i < len(buf); i++ {
