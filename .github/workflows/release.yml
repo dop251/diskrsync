@@ -1,7 +1,7 @@
 on:
   release:
     types: [created]
-
+name: Release
 jobs:
   releases-matrix:
     name: Release Go Binary

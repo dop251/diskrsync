@@ -39,13 +39,8 @@ type remoteProc struct {
 	cmd *exec.Cmd
 }
 
-type targetFile interface {
-	io.ReadWriteSeeker
-	io.Closer
-}
-
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] [--verbose] <src> <dst>\nsrc and dst is [[user@]host:]path\n", os.Args[0])
+	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] [--verbose] <src> <dst>\nsrc and dst is [[user@]host:]path\n", os.Args[0])
 	os.Exit(2)
 }
 
@@ -118,41 +113,51 @@ func (p *localProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan
 }
 
 func (p *localProc) run(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) {
+	var err error
 	if p.mode == modeSource {
-		errChan <- doSource(p.p, cmdReader, cmdWriter, p.opts)
+		err = doSource(p.p, cmdReader, cmdWriter, p.opts)
 	} else {
-		errChan <- doTarget(p.p, cmdReader, cmdWriter, p.opts)
+		err = doTarget(p.p, cmdReader, cmdWriter, p.opts)
 	}
 
-	cmdWriter.Close()
+	cerr := cmdWriter.Close()
+	if err == nil {
+		err = cerr
+	}
+	errChan <- err
+}
+
+func (p *remoteProc) pipeCopy(dst io.WriteCloser, src io.Reader) {
+	_, err := io.Copy(dst, src)
+	if err != nil {
+		log.Printf("pipe copy failed: %v", err)
+	}
+	err = dst.Close()
+	if err != nil {
+		log.Printf("close failed after pipe copy: %v", err)
+	}
 }
 
 func (p *remoteProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) error {
-	p.cmd.Stdout = cmdWriter
 	p.cmd.Stderr = os.Stderr
+	p.cmd.Stdin = cmdReader
 
-	w, err := p.cmd.StdinPipe()
+	r, err := p.cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-
-	go func() {
-		io.Copy(w, cmdReader)
-		w.Close()
-	}()
 
 	err = p.cmd.Start()
 	if err != nil {
 		return err
 	}
-	go p.run(cmdWriter, errChan)
+	go p.run(cmdWriter, r, errChan)
 	return nil
 }
 
-func (p *remoteProc) run(writer io.Closer, errChan chan error) {
-	err := p.cmd.Wait()
-	writer.Close()
-	errChan <- err
+func (p *remoteProc) run(w io.WriteCloser, r io.Reader, errChan chan error) {
+	p.pipeCopy(w, r)
+	errChan <- p.cmd.Wait()
 }
 
 func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) error {
@@ -176,39 +181,42 @@ func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		src = sf
 	}
 
-	size, err := src.Seek(0, os.SEEK_END)
+	size, err := src.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
 
-	_, err = src.Seek(0, os.SEEK_SET)
+	_, err = src.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
 
 	err = diskrsync.Source(src, size, cmdReader, cmdWriter, true, opts.verbose)
-	cmdWriter.Close()
+	cerr := cmdWriter.Close()
+	if err == nil {
+		err = cerr
+	}
 	return err
 }
 
-func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) error {
-	var w targetFile
-	useBuffer := false
+func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) (err error) {
+	var w spgz.SparseFile
+	useReadBuffer := false
 
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		return err
+		return
 	}
 
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
-		return err
+		_ = f.Close()
+		return
 	}
 
-	if info.Mode() & (os.ModeDevice | os.ModeCharDevice) != 0 {
-		w = f
-		useBuffer = true
+	if info.Mode()&(os.ModeDevice|os.ModeCharDevice) != 0 {
+		w = spgz.NewSparseFileWithoutHolePunching(f)
+		useReadBuffer = true
 	} else if !opts.noCompress {
 		sf, err := spgz.NewFromFileSize(f, os.O_RDWR|os.O_CREATE, diskrsync.DefTargetBlockSize)
 		if err != nil {
@@ -216,43 +224,50 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 				if err == spgz.ErrPunchHoleNotSupported {
 					err = fmt.Errorf("target does not support compression. Try with -no-compress option (error was '%v')", err)
 				}
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 		} else {
-			w = sf
+			w = &diskrsync.FixingSpgzFileWrapper{SpgzFile: sf}
 		}
 	}
 
 	if w == nil {
-		w = spgz.NewSparseWriter(spgz.NewSparseFileWithFallback(f))
-		useBuffer = true
+		w = spgz.NewSparseFileWithFallback(f)
+		useReadBuffer = true
 	}
 
-	defer w.Close()
+	defer func() {
+		cerr := w.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
 
-	size, err := w.Seek(0, os.SEEK_END)
+	size, err := w.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
 
-	_, err = w.Seek(0, os.SEEK_SET)
+	_, err = w.Seek(0, io.SeekStart)
 
 	if err != nil {
 		return err
 	}
 
-	err = diskrsync.Target(w, size, cmdReader, cmdWriter, useBuffer, opts.verbose)
-	cmdWriter.Close()
+	err = diskrsync.Target(w, size, cmdReader, cmdWriter, useReadBuffer, opts.verbose)
+	cerr := cmdWriter.Close()
+	if err == nil {
+		err = cerr
+	}
 
-	return err
+	return
 }
 
-func doCmd(opts *options) bool {
+func doCmd(opts *options) (err error) {
 	src, err := createProc(flag.Arg(0), modeSource, opts)
 	if err != nil {
-		log.Printf("Could not create source: %v", err)
-		return false
+		return fmt.Errorf("could not create source: %w", err)
 	}
 
 	path := flag.Arg(1)
@@ -262,8 +277,7 @@ func doCmd(opts *options) bool {
 
 	dst, err := createProc(path, modeTarget, opts)
 	if err != nil {
-		log.Printf("Could not create target: %v", err)
-		return false
+		return fmt.Errorf("could not create target: %w", err)
 	}
 
 	srcErrChan := make(chan error, 1)
@@ -276,24 +290,42 @@ func doCmd(opts *options) bool {
 	sw := &diskrsync.CountingWriteCloser{WriteCloser: srcWriter}
 
 	if opts.verbose {
-		src.Start(sr, sw, srcErrChan)
+		err = src.Start(sr, sw, srcErrChan)
 	} else {
-		src.Start(srcReader, srcWriter, srcErrChan)
+		err = src.Start(srcReader, srcWriter, srcErrChan)
 	}
 
-	dst.Start(dstReader, dstWriter, dstErrChan)
-	dstErr := <-dstErrChan
-	if dstErr != nil {
-		log.Printf("Target error: %v", dstErr)
+	if err != nil {
+		return fmt.Errorf("could not start source: %w", err)
 	}
-	srcErr := <-srcErrChan
-	if srcErr != nil {
-		log.Printf("Source error: %v", srcErr)
+
+	err = dst.Start(dstReader, dstWriter, dstErrChan)
+	if err != nil {
+		return fmt.Errorf("could not start target: %w", err)
 	}
+
+L:
+	for srcErrChan != nil || dstErrChan != nil {
+		select {
+		case dstErr := <-dstErrChan:
+			if dstErr != nil {
+				err = fmt.Errorf("target error: %w", dstErr)
+				break L
+			}
+			dstErrChan = nil
+		case srcErr := <-srcErrChan:
+			if srcErr != nil {
+				err = fmt.Errorf("source error: %w", srcErr)
+				break L
+			}
+			srcErrChan = nil
+		}
+	}
+
 	if opts.verbose {
 		log.Printf("Read: %d, wrote: %d\n", sr.Count(), sw.Count())
 	}
-	return srcErr == nil && dstErr == nil
+	return
 }
 
 func main() {
@@ -328,9 +360,9 @@ func main() {
 		if flag.Arg(0) == "" || flag.Arg(1) == "" {
 			usage()
 		}
-		ok := doCmd(&opts)
-		if !ok {
-			os.Exit(1)
+		err := doCmd(&opts)
+		if err != nil {
+			log.Fatal(err)
 		}
 	}
 

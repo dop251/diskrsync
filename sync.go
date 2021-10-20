@@ -34,21 +34,21 @@ const (
 )
 
 var (
-	ErrInvalidFormat = errors.New("Invalid data format")
+	ErrInvalidFormat = errors.New("invalid data format")
 )
 
 type hashPool []hash.Hash
 
 type workCtx struct {
-	buf []byte
-	n *node
+	buf  []byte
+	n    *node
 	hash hash.Hash
 
 	avail, hashReady chan struct{}
 }
 
 type node struct {
-	buf [hashSize]byte
+	buf    [hashSize]byte
 	parent *node
 	idx    int
 
@@ -57,7 +57,7 @@ type node struct {
 	size int
 
 	hash hash.Hash
-	sum []byte
+	sum  []byte
 }
 
 type tree struct {
@@ -81,7 +81,159 @@ type source struct {
 
 type target struct {
 	base
-	writer io.ReadWriteSeeker
+	writer *batchingWriter
+}
+
+// Accumulates successive writes into a large buffer so that the writes into the underlying spgz.SpgzFile
+// cover compressed blocks completely, so they are not read and unpacked before writing.
+type batchingWriter struct {
+	writer  spgz.SparseFile
+	maxSize int
+
+	offset   int64
+	holeSize int64
+	buf      []byte
+}
+
+func (w *batchingWriter) Flush() error {
+	if w.holeSize > 0 {
+		err := w.writer.PunchHole(w.offset, w.holeSize)
+		if err == nil {
+			w.offset += w.holeSize
+			w.holeSize = 0
+		}
+		return err
+	}
+	if len(w.buf) == 0 {
+		return nil
+	}
+	n, err := w.writer.WriteAt(w.buf, w.offset)
+	if err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.offset += int64(n)
+	return nil
+}
+
+func (w *batchingWriter) prepareWrite() error {
+	if w.holeSize > 0 {
+		err := w.Flush()
+		if err != nil {
+			return err
+		}
+	}
+	if cap(w.buf) < w.maxSize {
+		buf := make([]byte, w.maxSize)
+		copy(buf, w.buf)
+		w.buf = buf[:len(w.buf)]
+	}
+	return nil
+}
+
+func (w *batchingWriter) Write(p []byte) (int, error) {
+	if err := w.prepareWrite(); err != nil {
+		return 0, err
+	}
+	written := 0
+	for len(p) > 0 {
+		if len(p) >= w.maxSize && len(w.buf) == 0 {
+			residue := len(p) % w.maxSize
+			n, err := w.writer.WriteAt(p[:len(p)-residue], w.offset)
+			written += n
+			w.offset += int64(n)
+			if err != nil {
+				return written, err
+			}
+			p = p[n:]
+		} else {
+			n := copy(w.buf[len(w.buf):w.maxSize], p)
+			w.buf = w.buf[:len(w.buf)+n]
+			if len(w.buf) == w.maxSize {
+				n1, err := w.writer.WriteAt(w.buf, w.offset)
+				w.offset += int64(n1)
+				n2 := n1 - (len(w.buf) - n)
+				w.buf = w.buf[:0]
+				if n2 < 0 {
+					n2 = 0
+				}
+				written += n2
+				if err != nil {
+					return written, err
+				}
+			} else {
+				written += n
+			}
+			p = p[n:]
+		}
+	}
+
+	return written, nil
+}
+
+func (w *batchingWriter) ReadFrom(src io.Reader) (int64, error) {
+	if err := w.prepareWrite(); err != nil {
+		return 0, err
+	}
+
+	var read int64
+	for {
+		n, err := src.Read(w.buf[len(w.buf):w.maxSize])
+		read += int64(n)
+		w.buf = w.buf[:len(w.buf)+n]
+		if err == io.EOF {
+			return read, nil
+		}
+		if err != nil {
+			return read, err
+		}
+		if len(w.buf) == w.maxSize {
+			err = w.Flush()
+			if err != nil {
+				return read, err
+			}
+		}
+	}
+}
+
+func (w *batchingWriter) WriteHole(size int64) error {
+	if w.holeSize == 0 {
+		err := w.Flush()
+		if err != nil {
+			return err
+		}
+	}
+	w.holeSize += size
+	return nil
+}
+
+func (w *batchingWriter) Seek(offset int64, whence int) (int64, error) {
+	var o int64
+	if w.holeSize > 0 {
+		o = w.offset + w.holeSize
+	} else {
+		o = w.offset + int64(len(w.buf))
+	}
+	switch whence {
+	case io.SeekStart:
+		// no-op
+	case io.SeekCurrent:
+		offset = o + offset
+	case io.SeekEnd:
+		var err error
+		offset, err = w.writer.Seek(offset, whence)
+		if err != nil {
+			return offset, err
+		}
+	}
+	if offset != o {
+		err := w.Flush()
+		w.offset = offset
+		if err != nil {
+			return offset, err
+		}
+	}
+	return offset, nil
 }
 
 type counting struct {
@@ -159,7 +311,7 @@ func (n *node) childReady(child *node, pool *hashPool, h hash.Hash) {
 		}
 	}
 	n.hash.Write(child.sum)
-	if child.idx == len(n.children) - 1 {
+	if child.idx == len(n.children)-1 {
 		n.sum = n.hash.Sum(n.buf[:0])
 		if n.parent != nil {
 			n.parent.childReady(n, pool, n.hash)
@@ -183,9 +335,10 @@ func (t *tree) build(offset, length int64, order, level int) *node {
 		b := offset
 		for i := 0; i < order; i++ {
 			l := offset + (length * int64(i+1) / int64(order)) - b
-			n.children[i] = t.build(b, l, order, level)
-			n.children[i].parent = n
-			n.children[i].idx = i
+			child := t.build(b, l, order, level)
+			child.parent = n
+			child.idx = i
+			n.children[i] = child
 			b += l
 		}
 	} else {
@@ -242,7 +395,6 @@ func (t *tree) calc(verbose bool) error {
 		order = 1
 	}
 
-
 	bs := int(float64(t.size) / math.Pow(float64(order), float64(levels-1)))
 
 	if verbose {
@@ -270,8 +422,8 @@ func (t *tree) calc(verbose bool) error {
 	workItems := make([]*workCtx, 2)
 	for i := range workItems {
 		workItems[i] = &workCtx{
-			buf: make([]byte, bs+1),
-			avail: make(chan struct{}, 1),
+			buf:       make([]byte, bs+1),
+			avail:     make(chan struct{}, 1),
 			hashReady: make(chan struct{}, 1),
 		}
 		workItems[i].hash, _ = blake2b.New512(nil)
@@ -282,7 +434,7 @@ func (t *tree) calc(verbose bool) error {
 		idx := 0
 		for {
 			wi := workItems[idx]
-			<- wi.hashReady
+			<-wi.hashReady
 			if wi.n == nil {
 				break
 			}
@@ -306,7 +458,7 @@ func (t *tree) calc(verbose bool) error {
 
 		wi := workItems[workIdx]
 
-		<- wi.avail
+		<-wi.avail
 
 		b := wi.buf[:n.size]
 		r, err := io.ReadFull(reader, b)
@@ -333,7 +485,7 @@ func (t *tree) calc(verbose bool) error {
 
 	// wait until fully processed
 	for i := range workItems {
-		<- workItems[i].avail
+		<-workItems[i].avail
 	}
 
 	// finish the goroutine
@@ -359,17 +511,15 @@ func readHeader(reader io.Reader) (size int64, err error) {
 		return
 	}
 
-	br := bytes.NewBuffer(buf[len(hdrMagic):])
-	err = binary.Read(br, binary.LittleEndian, &size)
+	size = int64(binary.LittleEndian.Uint64(buf[len(hdrMagic):]))
 	return
 }
 
 func writeHeader(writer io.Writer, size int64) (err error) {
-	buf := make([]byte, 0, len(hdrMagic)+8)
-	bw := bytes.NewBuffer(buf)
-	bw.WriteString(hdrMagic)
-	binary.Write(bw, binary.LittleEndian, size)
-	_, err = writer.Write(bw.Bytes())
+	buf := make([]byte, len(hdrMagic)+8)
+	copy(buf, hdrMagic)
+	binary.LittleEndian.PutUint64(buf[len(hdrMagic):], uint64(size))
+	_, err = writer.Write(buf)
 	return
 }
 
@@ -378,7 +528,6 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 	if err != nil {
 		return
 	}
-
 	var remoteSize int64
 	remoteSize, err = readHeader(cmdReader)
 	if err != nil {
@@ -563,14 +712,68 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 	return
 }
 
-func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWriter io.Writer, useBuffer bool, verbose bool) (err error) {
+type TargetFile interface {
+	io.ReadWriteSeeker
+	io.WriterAt
+	io.Closer
+	spgz.Truncatable
+}
 
+// FixingSpgzFileWrapper conceals read errors caused by compressed data corruption by re-writing the corrupt
+// blocks with zeros. Such errors are usually caused by abrupt termination of the writing process.
+// This wrapper is used as the sync target so the corrupt blocks will be updated during the sync process.
+type FixingSpgzFileWrapper struct {
+	*spgz.SpgzFile
+}
+
+func (rw *FixingSpgzFileWrapper) checkErr(err error) error {
+	var ce *spgz.ErrCorruptCompressedBlock
+	if errors.As(err, &ce) {
+		if ce.Size() == 0 {
+			return rw.SpgzFile.Truncate(ce.Offset())
+		}
+
+		buf := make([]byte, ce.Size())
+		_, err = rw.SpgzFile.WriteAt(buf, ce.Offset())
+	}
+	return err
+}
+
+func (rw *FixingSpgzFileWrapper) Read(p []byte) (n int, err error) {
+	for n == 0 && err == nil { // avoid returning (0, nil) after a fix
+		n, err = rw.SpgzFile.Read(p)
+		if err != nil {
+			err = rw.checkErr(err)
+		}
+	}
+	return
+}
+
+func (rw *FixingSpgzFileWrapper) Seek(offset int64, whence int) (int64, error) {
+	o, err := rw.SpgzFile.Seek(offset, whence)
+	if err != nil {
+		err = rw.checkErr(err)
+		if err == nil {
+			o, err = rw.SpgzFile.Seek(offset, whence)
+		}
+	}
+	return o, err
+}
+
+func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter io.Writer, useReadBuffer bool, verbose bool) (err error) {
+
+	ch := make(chan error)
 	go func() {
-		writeHeader(cmdWriter, size)
+		ch <- writeHeader(cmdWriter, size)
 	}()
 
 	var remoteSize int64
 	remoteSize, err = readHeader(cmdReader)
+	if err != nil {
+		return
+	}
+
+	err = <-ch
 	if err != nil {
 		return
 	}
@@ -590,20 +793,23 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 				t: tree{
 					reader:    writer,
 					size:      commonSize,
-					useBuffer: useBuffer,
+					useBuffer: useReadBuffer,
 				},
 				cmdReader: cmdReader,
 				cmdWriter: cmdWriter,
 			},
-			writer: writer,
+			writer: &batchingWriter{writer: writer, maxSize: DefTargetBlockSize * 16},
 		}
-
 		err = t.t.calc(verbose)
 		if err != nil {
 			return
 		}
 
 		err = t.subtree(t.t.root, 0, commonSize)
+		if err != nil {
+			return
+		}
+		err = t.writer.Flush()
 		if err != nil {
 			return
 		}
@@ -658,7 +864,7 @@ func Target(writer io.ReadWriteSeeker, size int64, cmdReader io.Reader, cmdWrite
 					}
 					hole = true
 				} else {
-					return fmt.Errorf("Unexpected cmd: %d", cmd)
+					return fmt.Errorf("unexpected cmd: %d", cmd)
 				}
 			}
 		}
@@ -706,11 +912,7 @@ func (t *target) subtree(root *node, offset, size int64) (err error) {
 					err = fmt.Errorf("while copying block data at %d: %w", offset, err)
 				}
 			} else {
-				buf := t.buffer(size)
-				for i := int64(0); i < size; i++ {
-					buf[i] = 0
-				}
-				_, err = t.writer.Write(buf)
+				err = t.writer.WriteHole(size)
 			}
 		} else {
 			b := offset
