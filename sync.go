@@ -12,7 +12,6 @@ import (
 	"math"
 
 	"github.com/dop251/spgz"
-
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -36,6 +35,11 @@ const (
 var (
 	ErrInvalidFormat = errors.New("invalid data format")
 )
+
+type ProgressListener interface {
+	Start(size int64)
+	Update(position int64)
+}
 
 type hashPool []hash.Hash
 
@@ -72,6 +76,8 @@ type base struct {
 	buf       []byte
 	cmdReader io.Reader
 	cmdWriter io.Writer
+
+	syncProgressListener ProgressListener
 }
 
 type source struct {
@@ -354,7 +360,7 @@ func (t *tree) first(n *node) *node {
 	return n
 }
 
-func (t *tree) calc(verbose bool) error {
+func (t *tree) calc(verbose bool, progressListener ProgressListener) error {
 
 	var targetBlockSize int64 = DefTargetBlockSize
 
@@ -451,6 +457,10 @@ func (t *tree) calc(verbose bool) error {
 
 	workIdx := 0
 
+	if progressListener != nil {
+		progressListener.Start(t.size)
+	}
+
 	for n := t.first(t.root); n != nil; n = n.next() {
 		if n.size == 0 {
 			panic("Leaf node size is zero")
@@ -466,6 +476,9 @@ func (t *tree) calc(verbose bool) error {
 			return fmt.Errorf("in calc at %d (expected %d, read %d): %w", rr, len(b), r, err)
 		}
 		rr += int64(r)
+		if progressListener != nil {
+			progressListener.Update(rr)
+		}
 
 		wi.n = n
 
@@ -523,7 +536,7 @@ func writeHeader(writer io.Writer, size int64) (err error) {
 	return
 }
 
-func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.Writer, useBuffer bool, verbose bool) (err error) {
+func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.Writer, useBuffer bool, verbose bool, calcPl, syncPl ProgressListener) (err error) {
 	err = writeHeader(cmdWriter, size)
 	if err != nil {
 		return
@@ -556,22 +569,28 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 			reader: reader,
 		}
 
-		err = s.t.calc(verbose)
+		err = s.t.calc(verbose, calcPl)
 		if err != nil {
 			return
+		}
+
+		if syncPl != nil {
+			s.syncProgressListener = syncPl
+			syncPl.Start(size)
 		}
 
 		err = s.subtree(s.t.root, 0, commonSize)
 		if err != nil {
 			return
 		}
+	} else {
+		if syncPl != nil {
+			syncPl.Start(size)
+		}
 	}
 
 	if size > commonSize {
 		// Write the tail
-		if verbose {
-			log.Print("Writing tail...")
-		}
 		_, err = reader.Seek(commonSize, io.SeekStart)
 		if err != nil {
 			return
@@ -629,6 +648,9 @@ func Source(reader io.ReadSeeker, size int64, cmdReader io.Reader, cmdWriter io.
 				return
 			}
 			curPos += int64(r)
+			if syncPl != nil {
+				syncPl.Update(curPos)
+			}
 			if stop {
 				break
 			}
@@ -660,6 +682,9 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 
 	if bytes.Equal(root.sum, remoteHash) {
 		err = binary.Write(s.cmdWriter, binary.LittleEndian, cmdEqual)
+		if s.syncProgressListener != nil {
+			s.syncProgressListener.Update(offset + size)
+		}
 		return
 	}
 
@@ -690,6 +715,9 @@ func (s *source) subtree(root *node, offset, size int64) (err error) {
 			}
 
 			_, err = s.cmdWriter.Write(buf)
+		}
+		if s.syncProgressListener != nil {
+			s.syncProgressListener.Update(offset + size)
 		}
 	} else {
 		err = binary.Write(s.cmdWriter, binary.LittleEndian, cmdNotEqual)
@@ -760,7 +788,7 @@ func (rw *FixingSpgzFileWrapper) Seek(offset int64, whence int) (int64, error) {
 	return o, err
 }
 
-func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter io.Writer, useReadBuffer bool, verbose bool) (err error) {
+func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter io.Writer, useReadBuffer bool, verbose bool, calcPl, syncPl ProgressListener) (err error) {
 
 	ch := make(chan error)
 	go func() {
@@ -783,10 +811,6 @@ func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter i
 		commonSize = remoteSize
 	}
 
-	if verbose {
-		log.Printf("Local size: %d, remote size: %d", size, remoteSize)
-	}
-
 	if commonSize > 0 {
 		t := target{
 			base: base{
@@ -800,9 +824,14 @@ func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter i
 			},
 			writer: &batchingWriter{writer: writer, maxSize: DefTargetBlockSize * 16},
 		}
-		err = t.t.calc(verbose)
+		err = t.t.calc(verbose, calcPl)
 		if err != nil {
 			return
+		}
+
+		if syncPl != nil {
+			t.syncProgressListener = syncPl
+			syncPl.Start(remoteSize)
 		}
 
 		err = t.subtree(t.t.root, 0, commonSize)
@@ -813,14 +842,19 @@ func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter i
 		if err != nil {
 			return
 		}
+		if syncPl != nil {
+			syncPl.Update(commonSize)
+		}
+	} else {
+		if syncPl != nil {
+			syncPl.Start(remoteSize)
+		}
 	}
 
 	if size < remoteSize {
 		// Read the tail
-		if verbose {
-			log.Printf("Reading tail (%d bytes)...", remoteSize-size)
-		}
-		_, err = writer.Seek(commonSize, io.SeekStart)
+		pos := commonSize
+		_, err = writer.Seek(pos, io.SeekStart)
 		if err != nil {
 			return
 		}
@@ -840,12 +874,17 @@ func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter i
 			}
 
 			if cmd == cmdBlock {
-				_, err = io.CopyN(writer, rd, DefTargetBlockSize)
+				var n int64
+				n, err = io.CopyN(writer, rd, DefTargetBlockSize)
+				pos += n
 
 				hole = false
 				if err != nil {
 					if err == io.EOF {
 						err = nil
+						if syncPl != nil {
+							syncPl.Update(pos)
+						}
 						break
 					} else {
 						return fmt.Errorf("target: while copying block: %w", err)
@@ -863,9 +902,13 @@ func Target(writer spgz.SparseFile, size int64, cmdReader io.Reader, cmdWriter i
 						return
 					}
 					hole = true
+					pos += holeSize
 				} else {
 					return fmt.Errorf("unexpected cmd: %d", cmd)
 				}
+			}
+			if syncPl != nil {
+				syncPl.Update(pos)
 			}
 		}
 

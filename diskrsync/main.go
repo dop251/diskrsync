@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +15,8 @@ import (
 
 	"github.com/dop251/diskrsync"
 	"github.com/dop251/spgz"
+
+	"github.com/vbauerster/mpb/v7"
 )
 
 const (
@@ -26,7 +31,8 @@ type options struct {
 }
 
 type proc interface {
-	Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) error
+	Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error, calcPl, syncPl diskrsync.ProgressListener) error
+	IsLocal() bool
 }
 
 type localProc struct {
@@ -36,7 +42,16 @@ type localProc struct {
 }
 
 type remoteProc struct {
-	cmd *exec.Cmd
+	p    string
+	mode int
+	opts *options
+	host string
+	cmd  *exec.Cmd
+}
+
+// used to prevent output to stderr while the progress bars are active
+var bufStderr = bufferedOut{
+	w: os.Stderr,
 }
 
 func usage() {
@@ -58,7 +73,7 @@ func split(arg string) (host, path string) {
 	return
 }
 
-func createProc(arg string, mode int, opts *options) (proc, error) {
+func createProc(arg string, mode int, opts *options) proc {
 	host, path := split(arg)
 	if host != "" {
 		return createRemoteProc(host, path, mode, opts)
@@ -66,58 +81,38 @@ func createProc(arg string, mode int, opts *options) (proc, error) {
 	return createLocalProc(path, mode, opts)
 }
 
-func createRemoteProc(host, path string, mode int, opts *options) (proc, error) {
-	var m string
-	if mode == modeSource {
-		m = "--source"
-	} else {
-		m = "--target"
-		if opts.noCompress {
-			m += " --no-compress"
-		}
-	}
-	if opts.verbose {
-		m += " --verbose"
-	}
-
-	args := make([]string, 1, 8)
-	args[0] = "ssh"
-
-	if opts.sshFlags != "" {
-		flags := strings.Split(opts.sshFlags, " ")
-		args = append(args, flags...)
-	}
-
-	args = append(args, host, os.Args[0], m, path)
-	cmd := exec.Command("ssh")
-	cmd.Args = args
-
+func createRemoteProc(host, path string, mode int, opts *options) proc {
 	return &remoteProc{
-		cmd: cmd,
-	}, nil
+		host: host,
+		p:    path,
+		mode: mode,
+		opts: opts,
+	}
 }
 
-func createLocalProc(p string, mode int, opts *options) (proc, error) {
-	pr := &localProc{
+func createLocalProc(p string, mode int, opts *options) proc {
+	return &localProc{
 		p:    p,
 		mode: mode,
 		opts: opts,
 	}
-
-	return pr, nil
 }
 
-func (p *localProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) error {
-	go p.run(cmdReader, cmdWriter, errChan)
+func (p *localProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error, calcPl, syncPl diskrsync.ProgressListener) error {
+	go p.run(cmdReader, cmdWriter, errChan, calcPl, syncPl)
 	return nil
 }
 
-func (p *localProc) run(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) {
+func (p *localProc) IsLocal() bool {
+	return true
+}
+
+func (p *localProc) run(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error, calcPl, syncPl diskrsync.ProgressListener) {
 	var err error
 	if p.mode == modeSource {
-		err = doSource(p.p, cmdReader, cmdWriter, p.opts)
+		err = doSource(p.p, cmdReader, cmdWriter, p.opts, calcPl, syncPl)
 	} else {
-		err = doTarget(p.p, cmdReader, cmdWriter, p.opts)
+		err = doTarget(p.p, cmdReader, cmdWriter, p.opts, calcPl, syncPl)
 	}
 
 	cerr := cmdWriter.Close()
@@ -138,16 +133,102 @@ func (p *remoteProc) pipeCopy(dst io.WriteCloser, src io.Reader) {
 	}
 }
 
-func (p *remoteProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error) error {
-	p.cmd.Stderr = os.Stderr
-	p.cmd.Stdin = cmdReader
+func (p *remoteProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errChan chan error, calcPl, syncPl diskrsync.ProgressListener) error {
+	cmd := exec.Command("ssh")
+	p.cmd = cmd
+	args := cmd.Args
 
-	r, err := p.cmd.StdoutPipe()
+	if p.opts.sshFlags != "" {
+		flags := strings.Split(p.opts.sshFlags, " ")
+		args = append(args, flags...)
+	}
+
+	args = append(args, p.host, os.Args[0])
+
+	if p.mode == modeSource {
+		args = append(args, "--source")
+	} else {
+		args = append(args, "--target")
+		if p.opts.noCompress {
+			args = append(args, " --no-compress")
+		}
+	}
+	if p.opts.verbose && calcPl == nil {
+		args = append(args, " --verbose")
+	}
+	if calcPl == nil {
+		cmd.Stderr = os.Stderr
+	} else {
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return err
+		}
+		args = append(args, "--calc-progress")
+		if syncPl != nil {
+			args = append(args, "--sync-progress")
+		}
+
+		go func() {
+			r := bufio.NewReader(stderr)
+			readStart := func() (string, error) {
+				for {
+					line, err := r.ReadString('\n')
+					if name := strings.TrimPrefix(line, "[Start "); name != line && len(name) > 1 {
+						return name[:len(name)-2], nil
+					}
+					if len(line) > 0 {
+						_, werr := bufStderr.Write([]byte(line))
+						if werr != nil {
+							return "", werr
+						}
+					}
+					if err != nil {
+						return "", err
+					}
+				}
+			}
+			pr := &progressReader{
+				r:  r,
+				w:  &bufStderr,
+				pl: calcPl,
+			}
+			name, err := readStart()
+			if err != nil {
+				return
+			}
+			if name == "calc" {
+				err := pr.read()
+				if err != nil {
+					return
+				}
+				if syncPl != nil {
+					name, err = readStart()
+					if err != nil {
+						return
+					}
+				}
+			}
+			if syncPl != nil && name == "sync" {
+				pr.pl = syncPl
+				err = pr.read()
+				if err != nil {
+					return
+				}
+			}
+			_, _ = io.Copy(os.Stderr, r)
+		}()
+	}
+
+	args = append(args, p.p)
+	cmd.Args = args
+	cmd.Stdin = cmdReader
+
+	r, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
 
-	err = p.cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return err
 	}
@@ -155,12 +236,16 @@ func (p *remoteProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errCha
 	return nil
 }
 
+func (p *remoteProc) IsLocal() bool {
+	return false
+}
+
 func (p *remoteProc) run(w io.WriteCloser, r io.Reader, errChan chan error) {
 	p.pipeCopy(w, r)
 	errChan <- p.cmd.Wait()
 }
 
-func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) error {
+func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options, calcPl, syncPl diskrsync.ProgressListener) error {
 	f, err := os.Open(p)
 	if err != nil {
 		return err
@@ -191,7 +276,7 @@ func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		return err
 	}
 
-	err = diskrsync.Source(src, size, cmdReader, cmdWriter, true, opts.verbose)
+	err = diskrsync.Source(src, size, cmdReader, cmdWriter, true, opts.verbose, calcPl, syncPl)
 	cerr := cmdWriter.Close()
 	if err == nil {
 		err = cerr
@@ -199,7 +284,7 @@ func doSource(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 	return err
 }
 
-func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options) (err error) {
+func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *options, calcPl, syncPl diskrsync.ProgressListener) (err error) {
 	var w spgz.SparseFile
 	useReadBuffer := false
 
@@ -255,7 +340,7 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 		return err
 	}
 
-	err = diskrsync.Target(w, size, cmdReader, cmdWriter, useReadBuffer, opts.verbose)
+	err = diskrsync.Target(w, size, cmdReader, cmdWriter, useReadBuffer, opts.verbose, calcPl, syncPl)
 	cerr := cmdWriter.Close()
 	if err == nil {
 		err = cerr
@@ -265,20 +350,14 @@ func doTarget(p string, cmdReader io.Reader, cmdWriter io.WriteCloser, opts *opt
 }
 
 func doCmd(opts *options) (err error) {
-	src, err := createProc(flag.Arg(0), modeSource, opts)
-	if err != nil {
-		return fmt.Errorf("could not create source: %w", err)
-	}
+	src := createProc(flag.Arg(0), modeSource, opts)
 
 	path := flag.Arg(1)
 	if _, p := split(path); strings.HasSuffix(p, "/") {
 		path += filepath.Base(flag.Arg(0))
 	}
 
-	dst, err := createProc(path, modeTarget, opts)
-	if err != nil {
-		return fmt.Errorf("could not create target: %w", err)
-	}
+	dst := createProc(path, modeTarget, opts)
 
 	srcErrChan := make(chan error, 1)
 	dstErrChan := make(chan error, 1)
@@ -289,17 +368,44 @@ func doCmd(opts *options) (err error) {
 	sr := &diskrsync.CountingReader{Reader: srcReader}
 	sw := &diskrsync.CountingWriteCloser{WriteCloser: srcWriter}
 
+	var (
+		p                 *mpb.Progress
+		cancel            func()
+		srcCalcPl, syncPl diskrsync.ProgressListener
+	)
+
 	if opts.verbose {
-		err = src.Start(sr, sw, srcErrChan)
-	} else {
-		err = src.Start(srcReader, srcWriter, srcErrChan)
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		defer func() {
+			if cancel != nil {
+				cancel()
+			}
+			bufStderr.Release()
+		}()
+		p = mpb.NewWithContext(ctx)
+		if src.IsLocal() && !dst.IsLocal() {
+			syncPl = newSyncProgressBarListener(p)
+		}
+		srcCalcPl = newCalcProgressBarListener(p, "Source Checksums")
+		log.SetOutput(&bufStderr)
 	}
+	err = src.Start(sr, sw, srcErrChan, srcCalcPl, syncPl)
 
 	if err != nil {
 		return fmt.Errorf("could not start source: %w", err)
 	}
 
-	err = dst.Start(dstReader, dstWriter, dstErrChan)
+	var dstCalcPl, dstSyncPl diskrsync.ProgressListener
+
+	if opts.verbose {
+		dstCalcPl = newCalcProgressBarListener(p, "Target Checksums")
+		if syncPl == nil {
+			dstSyncPl = newSyncProgressBarListener(p)
+		}
+	}
+	err = dst.Start(dstReader, dstWriter, dstErrChan, dstCalcPl, dstSyncPl)
+
 	if err != nil {
 		return fmt.Errorf("could not start target: %w", err)
 	}
@@ -309,17 +415,29 @@ L:
 		select {
 		case dstErr := <-dstErrChan:
 			if dstErr != nil {
-				err = fmt.Errorf("target error: %w", dstErr)
-				break L
+				if !errors.Is(dstErr, io.EOF) {
+					err = fmt.Errorf("target error: %w", dstErr)
+					break L
+				}
 			}
 			dstErrChan = nil
 		case srcErr := <-srcErrChan:
 			if srcErr != nil {
-				err = fmt.Errorf("source error: %w", srcErr)
-				break L
+				if !errors.Is(srcErr, io.EOF) {
+					err = fmt.Errorf("source error: %w", srcErr)
+					break L
+				}
 			}
 			srcErrChan = nil
 		}
+	}
+
+	if cancel != nil {
+		if err == nil {
+			p.Wait()
+		}
+		cancel()
+		cancel = nil
 	}
 
 	if opts.verbose {
@@ -329,32 +447,47 @@ L:
 }
 
 func main() {
+	// These flags are for the remote command mode, not to be used directly.
 	var sourceMode = flag.Bool("source", false, "Source mode")
 	var targetMode = flag.Bool("target", false, "Target mode")
+	var calcProgress = flag.Bool("calc-progress", false, "Write calc progress")
+	var syncProgress = flag.Bool("sync-progress", false, "Write sync progress")
 
 	var opts options
 
 	flag.StringVar(&opts.sshFlags, "ssh-flags", "", "SSH flags")
 	flag.BoolVar(&opts.noCompress, "no-compress", false, "Store target as a raw file")
-	flag.BoolVar(&opts.verbose, "verbose", false, "Print statistics and some debug info")
+	flag.BoolVar(&opts.verbose, "verbose", false, "Print statistics, progress, and some debug info")
 
 	flag.Parse()
 
-	if *sourceMode {
-		if opts.verbose {
-			log.Println("Running source")
+	if *sourceMode || *targetMode {
+		var calcPl, syncPl diskrsync.ProgressListener
+
+		if *calcProgress {
+			calcPl = &progressWriter{
+				name: "calc",
+				w:    os.Stderr,
+			}
 		}
-		err := doSource(flag.Arg(0), os.Stdin, os.Stdout, &opts)
-		if err != nil {
-			log.Fatalf("Source failed: %s", err.Error())
+
+		if *syncProgress {
+			syncPl = &progressWriter{
+				name: "sync",
+				w:    os.Stderr,
+			}
 		}
-	} else if *targetMode {
-		if opts.verbose {
-			log.Println("Running target")
-		}
-		err := doTarget(flag.Arg(0), os.Stdin, os.Stdout, &opts)
-		if err != nil {
-			log.Fatalf("Target failed: %s", err.Error())
+
+		if *sourceMode {
+			err := doSource(flag.Arg(0), os.Stdin, os.Stdout, &opts, calcPl, syncPl)
+			if err != nil {
+				log.Fatalf("Source failed: %s", err.Error())
+			}
+		} else {
+			err := doTarget(flag.Arg(0), os.Stdin, os.Stdout, &opts, calcPl, syncPl)
+			if err != nil {
+				log.Fatalf("Target failed: %s", err.Error())
+			}
 		}
 	} else {
 		if flag.Arg(0) == "" || flag.Arg(1) == "" {

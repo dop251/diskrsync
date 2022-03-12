@@ -671,7 +671,7 @@ func syncAndCheckEqual1(src io.ReadSeeker, dst spgz.SparseFile, t *testing.T) (s
 	}
 
 	go func() {
-		err := Source(src, srcSize, srcReader, srcWriter, false, false)
+		err := Source(src, srcSize, srcReader, srcWriter, false, false, nil, nil)
 		cerr := srcWriter.Close()
 		if err == nil {
 			err = cerr
@@ -679,7 +679,7 @@ func syncAndCheckEqual1(src io.ReadSeeker, dst spgz.SparseFile, t *testing.T) (s
 		srcErrChan <- err
 	}()
 
-	err = Target(dst, dstSize, dstReaderC, dstWriterC, false, false)
+	err = Target(dst, dstSize, dstReaderC, dstWriterC, false, false, nil, nil)
 	cerr := dstWriter.Close()
 	if err == nil {
 		err = cerr
