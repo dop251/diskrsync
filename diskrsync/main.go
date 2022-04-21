@@ -26,6 +26,7 @@ const (
 
 type options struct {
 	sshFlags   string
+	cmdPath    string
 	noCompress bool
 	verbose    bool
 }
@@ -144,7 +145,13 @@ func (p *remoteProc) Start(cmdReader io.Reader, cmdWriter io.WriteCloser, errCha
 		args = append(args, flags...)
 	}
 
-	args = append(args, p.host, os.Args[0])
+	var cmdPath string
+	if cp := p.opts.cmdPath; cp != "" {
+		cmdPath = cp
+	} else {
+		cmdPath = os.Args[0]
+	}
+	args = append(args, p.host, cmdPath)
 
 	if p.mode == modeSource {
 		args = append(args, "--source")
@@ -460,6 +467,7 @@ func main() {
 	var opts options
 
 	flag.StringVar(&opts.sshFlags, "ssh-flags", "", "SSH flags")
+	flag.StringVar(&opts.cmdPath, "cmd-path", "", "Remote command path (defaults to argv[0])")
 	flag.BoolVar(&opts.noCompress, "no-compress", false, "Store target as a raw file")
 	flag.BoolVar(&opts.verbose, "verbose", false, "Print statistics, progress, and some debug info")
 
