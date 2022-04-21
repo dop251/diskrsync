@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +15,7 @@ import (
 	"github.com/dop251/diskrsync"
 	"github.com/dop251/spgz"
 
+	flag "github.com/spf13/pflag"
 	"github.com/vbauerster/mpb/v7"
 )
 
@@ -55,7 +55,8 @@ var bufStderr = bufferedOut{
 }
 
 func usage() {
-	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [--ssh-flags=\"...\"] [--no-compress] [--verbose] <src> <dst>\nsrc and dst is [[user@]host:]path\n", os.Args[0])
+	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [flags] <src> <dst>\nsrc and dst is [[user@]host:]path\n\nFlags:\n", os.Args[0])
+	flag.PrintDefaults()
 	os.Exit(2)
 }
 
@@ -452,6 +453,9 @@ func main() {
 	var targetMode = flag.Bool("target", false, "Target mode")
 	var calcProgress = flag.Bool("calc-progress", false, "Write calc progress")
 	var syncProgress = flag.Bool("sync-progress", false, "Write sync progress")
+	flag.CommandLine.VisitAll(func(f *flag.Flag) {
+		f.Hidden = true
+	})
 
 	var opts options
 
