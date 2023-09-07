@@ -41,6 +41,17 @@ GOPATH=$(pwd) GOARCH=arm go install github.com/dop251/diskrsync/diskrsync@latest
 ls -l bin/linux_arm/diskrsync
 ```
 
+Usage
+---
+`diskrsync [--ssh-flags="..."] [--no-compress] [--calc-progress] [--sync-progress] [--verbose] [{--source|--target}] <src> <dst>`
+- ssh-flags: additional args for ssh (example: `--ssh-flags="-i ~/.ssh/backup.key"`)
+- no-compress: do not compress the target image. This flag is required if the target is a block device.
+- calc-progress: display prograss bar for hash calulation phase
+- sync-progress: display progress bar for synchronisation phase
+- verbose: display both progress bars and additional info on block size and transferred data
+- source: (default) diskrsync is the source and it connects to the remote target
+- target: diskrsync connects the remote source
+- src/dst: `[[user@]host:]path` local or remote file/device
 
 Usage examples
 ---
@@ -63,3 +74,10 @@ diskrsync --verbose --no-compress --ssh-flags="-i id_file" /var/lib/libvirt/imag
 ```
 
 This ensures that /mnt/backup/disk.img is up-to-date with the source file.
+
+
+```shell
+diskrsync --verbose --no-compress /dev/mapper/vg0-snap_vm-101-disk-0 user@remotehost:/dev/rbd7
+```
+
+This command transfers local source block device (lvm snapshot) to remote block device (rados block device in the example).
